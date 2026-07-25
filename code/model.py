@@ -1,63 +1,11 @@
-import torch
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-import os
-import numpy as np
 import math
-import random
-import time
-import datetime
-from scipy.io import loadmat
-from torch.utils.data import DataLoader
-from torch.autograd import Variable
+import torch
 import torch.nn.functional as F
-import pandas as pd
-import mne
-from mne import Epochs, events_from_annotations, pick_types
-from mne.channels import make_standard_montage, read_custom_montage
-
 from torch import nn
 from torch import Tensor
 from einops import rearrange
 from einops.layers.torch import Rearrange, Reduce
-from utils import calMetrics
-from utils import calculatePerClass
 from utils import numberClassChannel
-from torch.backends import cudnn
-cudnn.benchmark = False
-cudnn.deterministic = True
-
-import torch
-
-
-import os
-import numpy as np
-import math
-import random
-import time
-import datetime
-from scipy.io import loadmat
-from torch.utils.data import DataLoader
-from torch.autograd import Variable
-import torch.nn.functional as F
-import pandas as pd
-import mne
-from mne import Epochs, events_from_annotations, pick_types
-from mne.channels import make_standard_montage, read_custom_montage
-
-from torch import nn
-from torch import Tensor
-from einops import rearrange
-from einops.layers.torch import Rearrange, Reduce
-from utils import calMetrics
-from utils import calculatePerClass
-from utils import numberClassChannel
-from torch.backends import cudnn
-cudnn.benchmark = False
-cudnn.deterministic = True
-from math import sqrt
-from masking import TriangularCausalMask, ProbMask
 
 class PatchEmbeddingCNN(nn.Module):
     def __init__(self, f1=8, kernel_size=64, D=2, pooling_size1=8, pooling_size2=8, dropout_rate=0.3, number_channel=22, emb_size=40):
@@ -88,6 +36,7 @@ class PatchEmbeddingCNN(nn.Module):
         self.projection_2 = nn.Sequential(
             Rearrange('b e (h) (w) -> b (h w) e'),
         )
+        self.projection = nn.Identity() if f2 == emb_size else nn.Linear(f2, emb_size)
 
 
 
@@ -97,7 +46,55 @@ class PatchEmbeddingCNN(nn.Module):
         x = self.cnn1(x)
         x = self.projection_2(x)
 
-        return x
+        return self.projection(x)
+
+
+class TimeFrequencyPatchEmbedding(nn.Module):
+    """STFT power-map branch aligned with the raw-EEG token sequence."""
+
+    def __init__(self, number_channel, emb_size, num_tokens=15, sample_rate=250,
+                 n_fft=64, hop_length=32, min_hz=8.0, max_hz=40.0,
+                 spectral_filters=24, dropout_rate=0.3):
+        super().__init__()
+        self.number_channel = number_channel
+        self.num_tokens = num_tokens
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.register_buffer("window", torch.hann_window(n_fft))
+        self.min_bin = max(0, int(math.ceil(min_hz * n_fft / sample_rate)))
+        self.max_bin = min(n_fft // 2 + 1, int(math.floor(max_hz * n_fft / sample_rate)) + 1)
+        self.spectral_cnn = nn.Sequential(
+            nn.Conv2d(number_channel, spectral_filters, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(spectral_filters),
+            nn.ELU(),
+            nn.Dropout2d(dropout_rate),
+        )
+        self.projection = nn.Linear(spectral_filters, emb_size)
+
+    def forward(self, x: Tensor) -> Tensor:
+        batch_size, _, channels, samples = x.shape
+        signals = x.squeeze(1).reshape(batch_size * channels, samples)
+        spectrum = torch.stft(
+            signals, n_fft=self.n_fft, hop_length=self.hop_length,
+            win_length=self.n_fft, window=self.window, return_complex=True,
+        ).abs().square()
+        spectrum = torch.log1p(spectrum).reshape(batch_size, channels, spectrum.size(1), spectrum.size(2))
+        spectrum = spectrum[:, :, self.min_bin:self.max_bin, :]
+        spectrum = self.spectral_cnn(spectrum).mean(dim=2)
+        spectrum = F.interpolate(spectrum, size=self.num_tokens, mode='linear', align_corners=False)
+        return self.projection(spectrum.transpose(1, 2))
+
+
+class GatedFeatureFusion(nn.Module):
+    """Selects the useful mixture of raw-signal and time-frequency features per token."""
+
+    def __init__(self, emb_size):
+        super().__init__()
+        self.gate = nn.Linear(emb_size * 2, emb_size)
+
+    def forward(self, raw_tokens: Tensor, spectral_tokens: Tensor) -> Tensor:
+        gate = torch.sigmoid(self.gate(torch.cat((raw_tokens, spectral_tokens), dim=-1)))
+        return gate * raw_tokens + (1.0 - gate) * spectral_tokens
     
 
 
@@ -307,6 +304,9 @@ class EEGTransformer(nn.Module):
         self.number_class, self.number_channel = numberClassChannel(database_type)
         self.emb_size = emb_size
         self.flatten_eeg1 = flatten_eeg1
+        self.num_tokens = flatten_eeg1 // emb_size
+        if self.num_tokens * emb_size != flatten_eeg1:
+            raise ValueError("flatten_eeg1 must equal emb_size multiplied by the number of tokens.")
         self.flatten = nn.Flatten()
         
         self.cnn = BranchEEGNetTransformer(heads, depth, emb_size, number_channel=self.number_channel,
@@ -316,6 +316,13 @@ class EEGTransformer(nn.Module):
                                               pooling_size1=eeg1_pooling_size1,
                                               pooling_size2=eeg1_pooling_size2,
                                               dropout_rate=eeg1_dropout_rate)
+        self.spectral = TimeFrequencyPatchEmbedding(
+            number_channel=self.number_channel,
+            emb_size=emb_size,
+            num_tokens=self.num_tokens,
+            dropout_rate=eeg1_dropout_rate,
+        )
+        self.fusion = GatedFeatureFusion(emb_size)
         
 
         self.position = PositioinalEncoding(emb_size, 100, dropout=0.1)
@@ -330,7 +337,9 @@ class EEGTransformer(nn.Module):
     def forward(self, x):
 
 
-        cnn = self.cnn(x)
+        raw_tokens = self.cnn(x)
+        spectral_tokens = self.spectral(x)
+        cnn = self.fusion(raw_tokens, spectral_tokens)
         # add label 
         cnn = cnn * math.sqrt(self.emb_size)
 

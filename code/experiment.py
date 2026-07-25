@@ -15,7 +15,7 @@ import pandas as pd
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 from utils import *
-from model_new import *
+from model import EEGTransformer
 
 import time
 from utils import numberClassChannel

@@ -44,8 +44,7 @@ import pandas as pd
 
 from pandas import ExcelWriter
 from torch.autograd import Variable
-from experiment_copy import *
-from model_new import *
+from experiment import ExP
 
 def set_seed(seed_n):
     """
