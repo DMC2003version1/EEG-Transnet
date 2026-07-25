@@ -37,6 +37,7 @@ import torch.nn.functional as F
 
 from utils import numberClassChannel
 from utils import load_data_evaluate
+from utils import calMetrics
 import xlsxwriter
 
 import numpy as np
