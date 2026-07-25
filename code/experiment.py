@@ -26,7 +26,7 @@ from utils import load_data_evaluate
 
 class ExP():
     def __init__(self, nsub, data_dir, result_name, dir,
-                 epochs=2000, 
+                 epochs=300, 
                  number_aug=2,
                  number_seg=8, 
                  device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
