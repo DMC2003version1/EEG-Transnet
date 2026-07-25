@@ -44,8 +44,7 @@ import pandas as pd
 
 from pandas import ExcelWriter
 from torch.autograd import Variable
-from experiment_copy import *
-from model_new import *
+from experiment import ExP
 
 def set_seed(seed_n):
     """
@@ -78,7 +77,7 @@ def main(dirs = r"C:",
          eeg1_pooling_size1=8,# p1
          eeg1_pooling_size2=8,# p2
          eeg1_dropout_rate=0.25,
-         flatten_eeg1=600 ,   
+         flatten_eeg1=320 ,
          validate_ratio = 0.3,
          subject_id = None
          ):

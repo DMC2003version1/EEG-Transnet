@@ -1,103 +1,114 @@
-import torch
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-import os
-import numpy as np
 import math
-import random
-import time
-import datetime
-from scipy.io import loadmat
-from torch.utils.data import DataLoader
-from torch.autograd import Variable
+import torch
 import torch.nn.functional as F
-import pandas as pd
-import mne
-from mne import Epochs, events_from_annotations, pick_types
-from mne.channels import make_standard_montage, read_custom_montage
-
 from torch import nn
 from torch import Tensor
 from einops import rearrange
-from einops.layers.torch import Rearrange, Reduce
-from utils import calMetrics
-from utils import calculatePerClass
 from utils import numberClassChannel
-from torch.backends import cudnn
-cudnn.benchmark = False
-cudnn.deterministic = True
-
-import torch
 
 
-import os
-import numpy as np
-import math
-import random
-import time
-import datetime
-from scipy.io import loadmat
-from torch.utils.data import DataLoader
-from torch.autograd import Variable
-import torch.nn.functional as F
-import pandas as pd
-import mne
-from mne import Epochs, events_from_annotations, pick_types
-from mne.channels import make_standard_montage, read_custom_montage
+class SincConv2D(nn.Module):
+    """Learnable band-pass filter bank applied independently to each EEG channel."""
 
-from torch import nn
-from torch import Tensor
-from einops import rearrange
-from einops.layers.torch import Rearrange, Reduce
-from utils import calMetrics
-from utils import calculatePerClass
-from utils import numberClassChannel
-from torch.backends import cudnn
-cudnn.benchmark = False
-cudnn.deterministic = True
-from math import sqrt
-from masking import TriangularCausalMask, ProbMask
-
-class PatchEmbeddingCNN(nn.Module):
-    def __init__(self, f1=8, kernel_size=64, D=2, pooling_size1=8, pooling_size2=8, dropout_rate=0.3, number_channel=22, emb_size=40):
+    def __init__(self, out_channels=18, kernel_size=31, sample_rate=250,
+                 min_hz=4.0, max_hz=40.0, min_band_hz=2.0):
         super().__init__()
-        f2 = D*f1
+        if kernel_size % 2 == 0:
+            raise ValueError("SincConv2D requires an odd kernel size.")
 
-        self.cnn1 = nn.Sequential(
-            # temporal conv kernel size 64=0.25fs
-            nn.Conv2d(1, f1, (1, kernel_size), (1, 1), padding='same', bias=False), 
-            nn.BatchNorm2d(f1),
-            # channel depth-wise conv
-            nn.Conv2d(f1, f2, (number_channel, 1), (1, 1), groups=f1, padding='valid', bias=False), # 
-            nn.BatchNorm2d(f2),
-            nn.ELU(),
-            # average pooling 1
-            nn.AvgPool2d((1, pooling_size1)),  # pooling acts as slicing to obtain 'patch' along the time dimension as in ViT
-            nn.Dropout(dropout_rate),
-            # spatial conv
-            nn.Conv2d(f2, f2, (1, 16), padding='same', bias=False), 
-            nn.BatchNorm2d(f2),
-            nn.ELU(),
+        self.out_channels = out_channels
+        self.sample_rate = float(sample_rate)
+        self.min_hz = float(min_hz)
+        self.max_hz = float(max_hz)
+        self.min_band_hz = float(min_band_hz)
 
-            # average pooling 2 to adjust the length of feature into transformer encoder
-            nn.AvgPool2d((1, pooling_size2)),
-            nn.Dropout(dropout_rate),         
-        )
-
-        self.projection_2 = nn.Sequential(
-            Rearrange('b e (h) (w) -> b (h w) e'),
-        )
-
-
+        frequencies = torch.linspace(0.1, 0.9, out_channels)
+        self.low_hz = nn.Parameter(torch.logit(frequencies))
+        self.band_hz = nn.Parameter(torch.zeros(out_channels))
+        time = (torch.arange(kernel_size) - kernel_size // 2) / self.sample_rate
+        self.register_buffer("time", time)
+        self.register_buffer("window", torch.hamming_window(kernel_size, periodic=False))
 
     def forward(self, x: Tensor) -> Tensor:
-        b, _, _, _ = x.shape
+        available = self.max_hz - self.min_hz - self.min_band_hz
+        low = self.min_hz + available * torch.sigmoid(self.low_hz)
+        high = low + self.min_band_hz + (self.max_hz - low - self.min_band_hz) * torch.sigmoid(self.band_hz)
 
-        x = self.cnn1(x)
-        x = self.projection_2(x)
+        time = self.time.unsqueeze(0)
+        low_pass_high = 2 * high.unsqueeze(1) * torch.sinc(2 * high.unsqueeze(1) * time)
+        low_pass_low = 2 * low.unsqueeze(1) * torch.sinc(2 * low.unsqueeze(1) * time)
+        filters = (low_pass_high - low_pass_low) * self.window.unsqueeze(0)
+        filters = filters / filters.abs().sum(dim=1, keepdim=True).clamp_min(1e-8)
+        return F.conv2d(x, filters[:, None, None, :], padding=(0, self.time.numel() // 2))
 
-        return x
+
+class MixedDepthTemporalCNN(nn.Module):
+    """A light multi-scale temporal encoder following the adaptive Sinc filter bank."""
+
+    def __init__(self, in_channels, filters_per_branch=8,
+                 kernel_sizes=(15, 31, 63, 125)):
+        super().__init__()
+        self.branches = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(in_channels, filters_per_branch, (1, kernel),
+                          padding=(0, kernel // 2), bias=False),
+                nn.BatchNorm2d(filters_per_branch),
+                nn.ELU(),
+            )
+            for kernel in kernel_sizes
+        ])
+        self.out_channels = filters_per_branch * len(kernel_sizes)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return torch.cat([branch(x) for branch in self.branches], dim=1)
+
+
+class LogVarianceTokenizer(nn.Module):
+    """Converts spatial-filter responses into fixed-length ERD/ERS power tokens."""
+
+    def __init__(self, in_channels, emb_size, num_tokens=8, dropout_rate=0.3):
+        super().__init__()
+        self.num_tokens = num_tokens
+        self.projection = nn.Sequential(
+            nn.Linear(in_channels, emb_size),
+            nn.Dropout(dropout_rate),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        # x: (batch, feature_channels, 1, time).  E[x^2] - E[x]^2 is variance.
+        x = x.squeeze(2)
+        mean = F.adaptive_avg_pool1d(x, self.num_tokens)
+        mean_square = F.adaptive_avg_pool1d(x.square(), self.num_tokens)
+        log_variance = torch.log((mean_square - mean.square()).clamp_min(1e-6))
+        return self.projection(log_variance.transpose(1, 2))
+
+
+class PatchEmbeddingCNN(nn.Module):
+    """Frequency-adaptive, multi-scale CNN stem used before the unchanged SATrans encoder."""
+
+    def __init__(self, f1=8, kernel_size=64, D=2, pooling_size1=8, pooling_size2=8,
+                 dropout_rate=0.3, number_channel=22, emb_size=40, sample_rate=250,
+                 sinc_filters=18, filters_per_branch=8, num_tokens=8):
+        super().__init__()
+        del f1, kernel_size, pooling_size1, pooling_size2  # retained for backward-compatible callers
+        self.sinc = SincConv2D(sinc_filters, kernel_size=31, sample_rate=sample_rate)
+        self.temporal = MixedDepthTemporalCNN(sinc_filters, filters_per_branch)
+        temporal_channels = self.temporal.out_channels
+        spatial_channels = temporal_channels * D
+        self.spatial = nn.Sequential(
+            nn.Conv2d(temporal_channels, spatial_channels, (number_channel, 1),
+                      groups=temporal_channels, bias=False),
+            nn.BatchNorm2d(spatial_channels),
+            nn.ELU(),
+            nn.Dropout(dropout_rate),
+        )
+        self.tokenizer = LogVarianceTokenizer(spatial_channels, emb_size, num_tokens, dropout_rate)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.sinc(x)
+        x = self.temporal(x)
+        x = self.spatial(x)
+        return self.tokenizer(x)
     
 
 
@@ -260,16 +271,18 @@ class BranchEEGNetTransformer(nn.Sequential):
                  pooling_size1 = 8,
                  pooling_size2 = 8,
                  dropout_rate = 0.3,
+                 num_tokens=8,
                  **kwargs):
         super().__init__(
             PatchEmbeddingCNN(f1=f1, 
                                  kernel_size=kernel_size,
                                  D=D, 
                                  pooling_size1=pooling_size1, 
-                                 pooling_size2=pooling_size2, 
+                                 pooling_size2=pooling_size2,
                                  dropout_rate=dropout_rate,
                                  number_channel=number_channel,
-                                 emb_size=emb_size),
+                                 emb_size=emb_size,
+                                 num_tokens=num_tokens),
 #             TransformerEncoder(heads, depth, emb_size),
         )
 
@@ -301,12 +314,13 @@ class EEGTransformer(nn.Module):
                  eeg1_pooling_size2=8,
                  eeg1_dropout_rate=0.3,
                  eeg1_number_channel=22,
-                 flatten_eeg1=600,
+                 flatten_eeg1=None,
+                 num_tokens=8,
                  **kwargs):
         super().__init__()
         self.number_class, self.number_channel = numberClassChannel(database_type)
         self.emb_size = emb_size
-        self.flatten_eeg1 = flatten_eeg1
+        self.flatten_eeg1 = flatten_eeg1 or emb_size * num_tokens
         self.flatten = nn.Flatten()
         
         self.cnn = BranchEEGNetTransformer(heads, depth, emb_size, number_channel=self.number_channel,
@@ -315,7 +329,8 @@ class EEGTransformer(nn.Module):
                                               D=eeg1_D,
                                               pooling_size1=eeg1_pooling_size1,
                                               pooling_size2=eeg1_pooling_size2,
-                                              dropout_rate=eeg1_dropout_rate)
+                                              dropout_rate=eeg1_dropout_rate,
+                                              num_tokens=num_tokens)
         
 
         self.position = PositioinalEncoding(emb_size, 100, dropout=0.1)

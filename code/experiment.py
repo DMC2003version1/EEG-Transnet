@@ -15,7 +15,7 @@ import pandas as pd
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 from utils import *
-from model_new import *
+from model import EEGTransformer
 
 import time
 from utils import numberClassChannel
@@ -41,7 +41,7 @@ class ExP():
                  eeg1_pooling_size1 = 8,
                  eeg1_pooling_size2 = 8,
                  eeg1_dropout_rate = 0.3,
-                 flatten_eeg1 = 600, 
+                 flatten_eeg1 = 320,
                  validate_ratio = 0.2,
                  learning_rate = 0.001,
                  batch_size = 72,  
