@@ -65,7 +65,8 @@ def set_seed(seed_n):
 
 
 
-def main(dirs = r"C:",
+def main(dirs="results",
+         data_dir=None,
          device ='device',              
          evaluate_mode = 'subject-dependent', 
          heads=8,             # heads of MHA
@@ -83,16 +84,27 @@ def main(dirs = r"C:",
          subject_id = None
          ):
 
-    if not os.path.exists(dirs):
-        os.makedirs(dirs)
+    if data_dir is None:
+        data_dir = os.environ.get("EEG_DATA_DIR")
+    if not data_dir:
+        raise ValueError(
+            "Set data_dir in main(...), or define the EEG_DATA_DIR environment variable."
+        )
 
-    result_write_metric = ExcelWriter(dirs+"/result_metric.xlsx")
+    data_dir = os.path.abspath(os.path.expanduser(os.fspath(data_dir)))
+    if not os.path.isdir(data_dir):
+        raise FileNotFoundError(f"EEG data directory does not exist: {data_dir}")
+
+    dirs = os.path.abspath(os.path.expanduser(os.fspath(dirs)))
+    os.makedirs(dirs, exist_ok=True)
+
+    result_write_metric = ExcelWriter(os.path.join(dirs, "result_metric.xlsx"))
     
     result_metric_dict = {}
     y_true_pred_dict = { } 
 
-    process_write = ExcelWriter(dirs+"/process_train.xlsx")
-    pred_true_write = ExcelWriter(dirs+"/pred_true.xlsx")
+    process_write = ExcelWriter(os.path.join(dirs, "process_train.xlsx"))
+    pred_true_write = ExcelWriter(os.path.join(dirs, "pred_true.xlsx"))
     subjects_result = []
     best_epochs = []
 
@@ -103,7 +115,7 @@ def main(dirs = r"C:",
     best = 0
     aver = 0
     
-    subject_to_train = [subject_id-1] if subject_id else range(9)
+    subject_to_train = [subject_id - 1] if subject_id is not None else range(9)
 
 
     for i in  subject_to_train :
@@ -119,9 +131,9 @@ def main(dirs = r"C:",
         index_round = 0
         print('Subject %d' % (i + 1))
         exp = ExP(i + 1, 
-                  data_dir=r"C:\Users\naonao\temp\EEG_informer\EEGconformer2a\mymat_raw/", 
-                  dir=dir,
-                  result_name = './results',
+                  data_dir=data_dir,
+                  output_dir=dirs,
+                  result_name=dirs,
                   epochs=300,
                   number_aug=2, 
                   number_seg=8, 
