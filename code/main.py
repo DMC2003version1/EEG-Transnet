@@ -81,8 +81,7 @@ def main(dirs="results",
          eeg1_dropout_rate=0.25,
          flatten_eeg1=320 ,
          validate_ratio = 0.3,
-         subject_id = None,
-         epochs=300,
+         subject_id = None
          ):
 
     if data_dir is None:
@@ -135,7 +134,7 @@ def main(dirs="results",
                   data_dir=data_dir,
                   output_dir=dirs,
                   result_name=dirs,
-                  epochs=epochs,
+                  epochs=300,
                   number_aug=2, 
                   number_seg=8, 
                   device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), 
