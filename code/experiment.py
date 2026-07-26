@@ -15,7 +15,7 @@ import pandas as pd
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 from utils import *
-from model_new import *
+from model import EEGTransformer
 
 import time
 from utils import numberClassChannel
@@ -25,7 +25,7 @@ from utils import load_data_evaluate
 
 
 class ExP():
-    def __init__(self, nsub, data_dir, result_name, dir,
+    def __init__(self, nsub, data_dir, result_name, output_dir=None,
                  epochs=2000, 
                  number_aug=2,
                  number_seg=8, 
@@ -61,12 +61,15 @@ class ExP():
         self.heads=heads
         self.emb_size=emb_size
         self.depth=depth
-        self.result_name = result_name
-        self.dir = dir
+        self.result_name = os.path.abspath(os.path.expanduser(os.fspath(result_name)))
+        self.output_dir = output_dir or self.result_name
+        os.makedirs(self.result_name, exist_ok=True)
         self.evaluate_mode = evaluate_mode
         self.validate_ratio = validate_ratio
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.log_write = open(f"results/log_subject{self.nSub}.txt", "w")
+        self.log_write = open(
+            os.path.join(self.result_name, f"log_subject{self.nSub}.txt"), "w"
+        )
 
         self.Tensor = torch.cuda.FloatTensor
         self.LongTensor = torch.cuda.LongTensor
