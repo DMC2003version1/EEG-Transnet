@@ -80,7 +80,8 @@ def main(dirs = r"C:",
          eeg1_dropout_rate=0.25,
          flatten_eeg1=600 ,   
          validate_ratio = 0.3,
-         subject_id = None
+         subject_id = None,
+         epochs=1000,
          ):
 
     if not os.path.exists(dirs):
@@ -122,7 +123,7 @@ def main(dirs = r"C:",
                   data_dir=r"C:\Users\naonao\temp\EEG_informer\EEGconformer2a\mymat_raw/", 
                   dir=dir,
                   result_name = './results',
-                  epochs=1000,
+                  epochs=epochs,
                   number_aug=2, 
                   number_seg=8, 
                   device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), 
