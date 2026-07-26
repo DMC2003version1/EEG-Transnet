@@ -57,8 +57,6 @@ from torch.backends import cudnn
 cudnn.benchmark = False
 cudnn.deterministic = True
 from math import sqrt
-from masking import TriangularCausalMask, ProbMask
-
 class PatchEmbeddingCNN(nn.Module):
     def __init__(self, f1=8, kernel_size=64, D=2, pooling_size1=8, pooling_size2=8, dropout_rate=0.3, number_channel=22, emb_size=40):
         super().__init__()
