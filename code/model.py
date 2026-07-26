@@ -247,6 +247,57 @@ class TransformerEncoder(nn.Sequential):
         super().__init__(*[TransformerEncoderBlock(emb_size, heads) for _ in range(depth)])
 
 
+class CausalConv1d(nn.Conv1d):
+    """One-dimensional convolution padded only on the past side."""
+
+    def __init__(self, in_channels, out_channels, kernel_size, dilation=1, groups=1):
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            dilation=dilation,
+            groups=groups,
+        )
+        self.left_padding = (kernel_size - 1) * dilation
+
+    def forward(self, x):
+        return super().forward(F.pad(x, (self.left_padding, 0)))
+
+
+class TCNBlock(nn.Module):
+    """Residual dilated temporal block operating on embedded EEG tokens."""
+
+    def __init__(self, channels, kernel_size=4, dilation=1, dropout=0.3):
+        super().__init__()
+        self.block = nn.Sequential(
+            CausalConv1d(channels, channels, kernel_size, dilation=dilation),
+            nn.BatchNorm1d(channels),
+            nn.ELU(),
+            nn.Dropout(dropout),
+            CausalConv1d(channels, channels, kernel_size, dilation=dilation),
+            nn.BatchNorm1d(channels),
+            nn.ELU(),
+            nn.Dropout(dropout),
+        )
+        self.activation = nn.ELU()
+
+    def forward(self, x):
+        return self.activation(x + self.block(x))
+
+
+class TemporalConvNet(nn.Sequential):
+    def __init__(self, channels, depth=2, kernel_size=4, dropout=0.3):
+        super().__init__(*[
+            TCNBlock(
+                channels,
+                kernel_size=kernel_size,
+                dilation=2 ** layer,
+                dropout=dropout,
+            )
+            for layer in range(depth)
+        ])
+
+
 
 
 class BranchEEGNetTransformer(nn.Sequential):
@@ -302,6 +353,9 @@ class EEGTransformer(nn.Module):
                  eeg1_dropout_rate=0.3,
                  eeg1_number_channel=22,
                  flatten_eeg1=600,
+                 tcn_depth=2,
+                 tcn_kernel_size=4,
+                 tcn_dropout=0.3,
                  **kwargs):
         super().__init__()
         self.number_class, self.number_channel = numberClassChannel(database_type)
@@ -321,11 +375,17 @@ class EEGTransformer(nn.Module):
         self.position = PositioinalEncoding(emb_size, 100, dropout=0.1)
         self.trans = TransformerEncoder(heads, depth, emb_size)
 
+        self.tcn = TemporalConvNet(
+            emb_size,
+            depth=tcn_depth,
+            kernel_size=tcn_kernel_size,
+            dropout=tcn_dropout,
+        )
+
 
         
          
-        self.flatten = nn.Flatten()
-        self.classification = ClassificationHead(self.flatten_eeg1, self.number_class) # FLATTEN_EEGNet + FLATTEN_cnn_module
+        self.classification = ClassificationHead(emb_size, self.number_class)
 
     def forward(self, x):
 
@@ -339,8 +399,11 @@ class EEGTransformer(nn.Module):
 
         features = cnn + features
 
-        # features = self.cnn_output(features)
-        out = self.classification(self.flatten(features))
+        # TCN models local and dilated temporal transitions between tokens.
+        features = self.tcn(features.transpose(1, 2))
+        pooled = features.mean(dim=-1)
 
-        return features, out
+        out = self.classification(pooled)
+
+        return features.transpose(1, 2), out
     
