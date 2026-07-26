@@ -135,7 +135,8 @@ def load_data(dir_path, dataset_type, n_sub, mode='train'):
         mode_s = 'T'
     else:
         mode_s = 'E'
-    data_mat = scipy.io.loadmat(dir_path + '{}{:02d}{}.mat'.format(dataset_type, n_sub, mode_s))
+    file_name = '{}{:02d}{}.mat'.format(dataset_type, n_sub, mode_s)
+    data_mat = scipy.io.loadmat(os.path.join(dir_path, file_name))
     data = data_mat['data']  # (288, 22, 1000)
     label =data_mat['label']
     return data, label
